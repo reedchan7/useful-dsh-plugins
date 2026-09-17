@@ -1,0 +1,12 @@
+# dsh-cost bundle patch.
+#
+# The client half needs no row here: `dsh.client` in package.json makes the
+# browser half (exports "./client", served at
+# /plugins/@reedchan7/dsh-cost/client.js) load into the web GUI.
+#
+# Activate with either form:
+#   dsh plugin --profile web add link:/path/to/useful-dsh-plugins/plugins/dsh-cost
+#   dsh plugin --profile web add github:reedchan7/useful-dsh-plugins#v0.1.0
+- insert:
+    - id: dsh-cost
+      name: '@reedchan7/dsh-cost'

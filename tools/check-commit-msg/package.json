@@ -1,0 +1,10 @@
+{
+  "name": "@useful-dsh/tool-check-commit-msg",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Repository tooling for useful-dsh-plugins.",
+  "bin": {
+    "check-commit-msg": "./src/index.ts"
+  },
+  "type": "module"
+}

@@ -1,0 +1,54 @@
+{
+  "compilerOptions": {
+    // Language and module target: the newest syntax for a repo that is bundled
+    // (bun build) and type-checked (tsc) rather than emitted by tsc.
+    "target": "esnext",
+    "module": "preserve",
+    "moduleResolution": "bundler",
+    "lib": ["esnext", "dom", "dom.iterable"],
+    "types": ["bun"],
+
+    // The type-check gate runs every strictness switch the compiler offers.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "useUnknownInCatchVariables": true,
+    "allowUnreachableCode": false,
+    "allowUnusedLabels": false,
+
+    // Type-only syntax that erases cleanly. `erasableSyntaxOnly` bans enums,
+    // parameter properties and namespaces, which is what keeps every source file
+    // runnable by Bun directly (no transform step) and bundlable by bun build.
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+    "isolatedModules": true,
+    "noUncheckedSideEffectImports": true,
+    "allowImportingTsExtensions": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // tsc never emits: bun build produces every artifact.
+    "noEmit": true,
+    "skipLibCheck": true,
+
+    "paths": {
+      "@useful-dsh/cost-core": ["./lib/cost-core/src/index.ts"],
+      "@useful-dsh/tz": ["./lib/tz/src/index.ts"],
+      "@useful-dsh/fmt": ["./lib/fmt/src/index.ts"],
+      "@useful-dsh/i18n": ["./lib/i18n/src/index.ts"]
+    }
+  },
+  "include": [
+    "lib/**/*.ts",
+    "tools/**/*.ts",
+    "plugins/*/src/**/*.ts",
+    "plugins/*/tests/**/*.ts",
+    "scripts/**/*.ts"
+  ],
+  "exclude": ["node_modules", "**/lib/client.js", "**/lib/index.js", "templates"]
+}

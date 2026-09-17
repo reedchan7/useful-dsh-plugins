@@ -1,0 +1,10 @@
+node_modules/
+
+# Plugin build artifacts (lib/index.js for the node half, lib/client.js for the
+# browser half). Sources live in plugins/*/src.
+plugins/*/lib/
+
+# Local tooling output
+coverage/
+*.tsbuildinfo
+.dsh-local/

@@ -1,0 +1,53 @@
+{
+  "name": "useful-dsh-plugins",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A collection of useful DeepSeek Harness (DSH) plugins, developed as independent packages in one Bun workspace.",
+  "license": "MIT",
+  "workspaces": [
+    "lib/*",
+    "tools/*",
+    "plugins/*"
+  ],
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "bun test",
+    "test:changed": "bun test --changed=origin/main",
+    "lint": "oxlint --deny-warnings .",
+    "lint:fix": "oxlint --fix .",
+    "fmt": "oxfmt --write .",
+    "fmt:check": "oxfmt --check .",
+    "docs:check": "bun tools/check-docs-pairing/src/index.ts",
+    "build:plugins": "bun run scripts/build-plugins.ts",
+    "check": "bun run fmt:check && bun run lint && bun run typecheck && bun run docs:check && bun run test && bun run build:plugins"
+  },
+  "devDependencies": {
+    "@types/bun": "catalog:",
+    "@types/react": "19.3.0",
+    "@types/react-dom": "19.3.0",
+    "@useful-dsh/cost-core": "workspace:*",
+    "@useful-dsh/fmt": "workspace:*",
+    "@useful-dsh/i18n": "workspace:*",
+    "@useful-dsh/tz": "workspace:*",
+    "lefthook": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "7.0.2001",
+    "react": "19.3.0",
+    "react-dom": "19.3.0",
+    "typescript": "catalog:"
+  },
+  "engines": {
+    "bun": ">=1.4.0",
+    "node": ">=22.19.0"
+  },
+  "packageManager": "bun@1.4.3",
+  "catalog": {
+    "typescript": "7.0.2",
+    "oxlint": "1.83.0",
+    "oxfmt": "0.68.0",
+    "lefthook": "2.1.14",
+    "@types/bun": "1.3.5"
+  }
+}

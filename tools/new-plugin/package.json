@@ -1,0 +1,10 @@
+{
+  "name": "@useful-dsh/tool-new-plugin",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Repository tooling for useful-dsh-plugins.",
+  "bin": {
+    "new-plugin": "./src/index.ts"
+  },
+  "type": "module"
+}

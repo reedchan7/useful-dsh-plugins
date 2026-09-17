@@ -1,0 +1,5 @@
+# dsh-example bundle patch: mounts the host half. The browser half needs no row
+# here — `dsh.client` in package.json makes exports "./client" load into the GUI.
+- insert:
+    - id: dsh-example
+      name: '@reedchan7/dsh-example'

@@ -1,0 +1,15 @@
+# Bun configuration.
+#
+# The workspace is developed with Bun but every plugin it produces must install
+# through `dsh plugin` (a pnpm forwarder) into a DSH profile. That is why plugin
+# packages carry no runtime dependencies: `bun add link:` and `pnpm add link:`
+# do not install a linked package's transitive dependencies, so anything a
+# plugin needs at runtime is bundled into its own lib/ by scripts/build-plugins.ts.
+
+[install]
+# Exact versions only: this repo pins its whole toolchain through the catalog in
+# package.json, and a floating range would silently drift from the pinned one.
+exact = true
+
+[install.lockfile]
+save = true

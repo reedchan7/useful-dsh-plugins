@@ -1,0 +1,10 @@
+{
+  "name": "@useful-dsh/i18n",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Shared library consumed by the plugins in this workspace; bundled at build time, never a runtime dependency.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  }
+}
