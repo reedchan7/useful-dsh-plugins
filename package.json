@@ -13,7 +13,7 @@
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
     "test": "bun test",
-    "test:changed": "bun test --changed=origin/main",
+    "test:changed": "git rev-parse --verify --quiet origin/main >/dev/null && bun test --changed=origin/main || bun test",
     "lint": "oxlint --deny-warnings .",
     "lint:fix": "oxlint --fix .",
     "fmt": "oxfmt --write .",
