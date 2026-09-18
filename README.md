@@ -11,6 +11,12 @@ developed as independent packages in one Bun workspace.
 | --------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | [`@reedchan7/dsh-cost`](plugins/dsh-cost/README.md) | Estimated API cost for the current session, the current turn and today (all projects) in DSH's composer stats row, with a per-model breakdown panel. Follows the DSH language and the reader's timezone. |
 
+## Screenshots
+
+### dsh-cost
+
+<img width="487" height="966" alt="image" src="https://github.com/user-attachments/assets/70c76f22-e143-4e95-9276-45cf41eda0b8" />
+
 ## Quick start
 
 ```sh
