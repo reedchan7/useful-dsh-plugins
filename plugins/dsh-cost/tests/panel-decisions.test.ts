@@ -12,6 +12,7 @@ import { describe, expect, test } from 'bun:test'
 import {
   compositionRows,
   nextSwitchOf,
+  todayFigureOf,
   unpricedModelsOf,
   type SummaryPayload,
 } from '../src/client/CostPill.ts'
@@ -104,6 +105,35 @@ describe('the next rate change row', () => {
   test('half a pair is not a countdown either', () => {
     expect(nextSwitchOf(payload({ period: { current: 'peak', nextAt: 1 } }))).toBeNull()
     expect(nextSwitchOf(payload({ period: { current: 'peak', next: 'peak' } }))).toBeNull()
+  })
+})
+
+function day(total: number | null, tokens: number): NonNullable<SummaryPayload['today']> {
+  return {
+    total,
+    sessionTotal: null,
+    tokens,
+    sessions: 1,
+    projects: 1,
+    dayKey: '2026-09-18',
+    hourly: [],
+  }
+}
+
+describe('the figure the pill shows for today', () => {
+  test('a priced day shows its total', () => {
+    expect(todayFigureOf(payload({ today: day(1.5, 1000) }))).toBe(1.5)
+  })
+
+  test('an idle day reads as zero, not as a dash', () => {
+    // Nothing billed today is an ordinary state; "—" made it look like the
+    // plugin had lost the figure entirely.
+    expect(todayFigureOf(payload({ today: day(null, 0) }))).toBe(0)
+  })
+
+  test('usage that priced nowhere keeps the dash', () => {
+    expect(todayFigureOf(payload({ today: day(null, 5000) }))).toBeNull()
+    expect(todayFigureOf(payload({}))).toBeNull()
   })
 })
 

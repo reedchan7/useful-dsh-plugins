@@ -12,6 +12,8 @@ export const en = {
   'pill.today': 'Today',
   'pill.cost': 'Cost',
   'pill.costHint': 'Today, all projects · session {session} · turn {turn} · {period} rate',
+  'pill.costHintAccount':
+    'Today, all projects · account (all devices) {account} · session {session} · turn {turn} · {period} rate',
   'pill.balance': 'Balance',
   'pill.estimated': 'Estimated',
   'pill.noData': 'No usage recorded yet',
@@ -49,7 +51,7 @@ export const en = {
   'panel.outputCost': 'Output',
   'panel.compositionUnpriced': '{count} attempt(s) had no price and are missing from this split.',
   'panel.dayOnlyLive':
-    'Only the sessions live in this process are counted so far; finished session logs were not readable.',
+    'No finished session logs were read; only sessions live in this process are counted.',
   'panel.sourceLive': 'Live sessions',
   'panel.sourceHistory': 'Finished sessions',
   'panel.sourceDraining': 'Handing over',
@@ -57,6 +59,29 @@ export const en = {
   'panel.noUsage': 'No token usage in this session yet.',
   'panel.scopeNote':
     'Aggregated across {projects} projects and {sessions} sessions on this machine.',
+  'panel.machineToday': 'This machine today · live estimate',
+  'panel.accountTitle': 'Account · all devices',
+  'panel.accountToday': 'Settled today (Beijing time)',
+  'panel.accountAsOf': 'Platform data as of {time}',
+  'panel.accountNote':
+    'Includes spend from your other devices; platform figures settle with a delay.',
+  'panel.accountSetupHow':
+    'On any device signed in to platform.deepseek.com/usage, open the browser console (F12) and run:',
+  'panel.tokenCopy': 'Copy',
+  'panel.tokenCopied': 'Copied',
+  'panel.tokenPasteHere': 'Paste the result here',
+  'panel.tokenSave': 'Save',
+  'panel.tokenSaving': 'Verifying…',
+  'panel.tokenInvalid': 'The platform rejected that token — copy it again and retry.',
+  'panel.tokenChange': 'Change',
+  'panel.tokenRemove': 'Remove',
+  'panel.tokenRemoveConfirm': 'Confirm removal',
+  'panel.tokenCancel': 'Cancel',
+  'panel.accountLoading': 'Loading account usage…',
+  'panel.accountErrInvalidToken': 'Platform token expired or invalid; update it to refresh.',
+  'panel.accountErrUnreachable': 'Platform unreachable right now.',
+  'panel.accountErrHttp': 'Platform request failed.',
+  'panel.accountErrBadResponse': 'Unexpected platform response.',
   'panel.notLive': 'This session is not live in the host process; cost is unavailable.',
   'panel.oldFormatSkipped': '{count} older session files were skipped (unsupported format).',
   'panel.sessionBeforePlugin':

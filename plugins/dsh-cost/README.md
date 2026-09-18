@@ -7,10 +7,10 @@ turn, and today across every project on this machine.
 
 ## What it shows
 
-| Where            | What                                                                                                                                                                                                         |
-| ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Stats row pill   | `¥ Cost ¥9.68` — today across every project, on the same line as the shipped turn, speed, token and cache figures; the tooltip and the panel carry the session and turn                                      |
-| Panel (click it) | Today's hourly chart, session totals, cache-hit share, current turn, per-turn bars, per-model breakdown, cost composition, rate period with a countdown to the next change, and the account-level scope note |
+| Where            | What                                                                                                                                                                                                                                    |
+| ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Stats row pill   | `¥ Cost ¥9.68` — today across every project, on the same line as the shipped turn, speed, token and cache figures; the tooltip and the panel carry the session and turn                                                                 |
+| Panel (click it) | Today's hourly chart, session totals, cache-hit share, current turn, per-turn bars, per-model breakdown, cost composition, rate period with a countdown to the next change, the account-level (all devices) section, and the scope note |
 
 The plugin registers on `conversation.composer.dock` — the ambient row under the composer where DSH
 renders its own stats pills — so the theme, font size and language all follow the GUI without
@@ -54,9 +54,28 @@ Restart `dsh web` and hard-refresh the browser. Restarting alone does not rebuil
   list carries the date it was captured, and re-verifying it against the published pricing page is a
   release step (see the header comment in `lib/cost-core/src/pricing.ts`).
 
+## Account-level usage (all devices)
+
+The figures above are computed from this machine's session logs — they cannot see the account being
+used on your other devices, while the invoice covers all of them. With a platform token configured,
+the panel gains an **Account · all devices** section: the settled cost of the billed day (Beijing
+time, matching the invoice), token totals, and the data's timestamp, straight from the platform's
+own usage endpoints (`platform.deepseek.com/api/v0/usage/by_api_key/{amount,cost}`). These are the
+platform's actuals, not estimates, and they settle with a delay — expect them to differ from the
+machine-level figures, with the difference being your other devices.
+
+Setup: open the cost panel and the account section walks you through it — on any device signed in
+to <https://platform.deepseek.com/usage> (the DSH machine itself needs no browser session), run the
+console snippet it shows, paste the result into the panel, and save. The host validates the token
+against the platform before persisting it to `$DSH_HOME/dsh-cost-platform-token` (mode `0600`;
+writing that file by hand also works, and is the way in for a headless host). The token is the web
+console's session token — the `sk-` API key is rejected by these endpoints — and it never leaves the
+host: the routes report figures and status codes only. The platform is asked at most once every five
+minutes, in the background; a failed refresh keeps the last good figures and names the failure.
+
 ## Scope and limitations
 
-- **Today** is account-level and includes finished sessions. Three sources are merged: the live
+- **Today** covers every project on this machine and includes finished sessions. Three sources are merged: the live
   session registry (turns that have not reached disk yet); a draining set of sessions the registry
   already dropped whose checkpoint flush has not landed yet — the store buffers a session's events
   and writes them at a checkpoint, so the on-disk log can lag the end of a session by an hour or
@@ -68,17 +87,17 @@ Restart `dsh web` and hard-refresh the browser. Restarting alone does not rebuil
   `not-live` for its session detail; the day total is unaffected.
 - A session log this build cannot read is **counted and shown** in the panel footer rather than
   skipped in silence.
-- The account total is priced with the published list, so it is an estimate: the provider's own
-  billing view remains the authority.
+- The machine-level total is priced with the published list, so it is an estimate: the provider's
+  own billing view remains the authority, and the account-level section is that view.
 
 ## Routes
 
 Both routes are exact paths on the DSH host and reject anything that is not a loopback request:
 
-| Route                                          | Returns                                                                             |
-| ---------------------------------------------- | ----------------------------------------------------------------------------------- |
-| `GET /api/dsh-cost/summary?session=&tz=&lang=` | Session, turn, and today totals with per-turn, per-model and composition breakdowns |
-| `GET /api/dsh-cost/config`                     | The price book in force, the billed timezone, and the peak windows                  |
+| Route                                          | Returns                                                                                                           |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| `GET /api/dsh-cost/summary?session=&tz=&lang=` | Session, turn, and today totals with per-turn, per-model and composition breakdowns, plus the account-level block |
+| `GET /api/dsh-cost/config`                     | The price book in force, the billed timezone, and the peak windows                                                |
 
 `currency=CNY|USD` overrides the configured book for one request.
 

@@ -19,6 +19,7 @@ import {
   RATE_TABLES,
   emptyFoldState,
   foldEvent,
+  mergeSummaries,
   summarize,
   summarizeComposition,
   type CostComposition,
@@ -28,8 +29,19 @@ import {
   type RateTable,
   type UsageAttempt,
 } from '@useful-dsh/cost-core'
-import { computeInstant, dayKey, type BillingClock } from '@useful-dsh/tz'
+import { computeInstant, dayKey, dayStart, type BillingClock } from '@useful-dsh/tz'
 
+import {
+  ACCOUNT_TIMEZONE,
+  createAccountCache,
+  deletePlatformToken,
+  fetchAccountUsage,
+  writePlatformToken,
+  type AccountCache,
+  type AccountCacheDeps,
+  type AccountSnapshot,
+  type AccountStatus,
+} from './account.ts'
 import {
   createHistoryCache,
   scanHistory,
@@ -48,6 +60,12 @@ export const SUMMARY_PATH = '/api/dsh-cost/summary'
 
 /** Route reporting the price book the host is pricing with. */
 export const CONFIG_PATH = '/api/dsh-cost/config'
+
+/**
+ * Route the panel saves (and clears) the platform token through. The host validates a new token
+ * against the platform before persisting it, so a typo never replaces a working credential.
+ */
+export const ACCOUNT_TOKEN_PATH = '/api/dsh-cost/account-token'
 
 export const inject = ['webServer', 'sessions'] as const
 
@@ -142,13 +160,15 @@ export interface CostStore {
    * checkpoints land (see {@link scanHistory}).
    */
   draining: Map<string, DrainingState>
+  /** Account-level (all-devices) reading from the platform, refreshed in the background. */
+  account: AccountCache
 }
 
 /** The slice of a DSH session the fold reads. */
 interface LiveSession {
   id: string
   seq: number
-  eventAt(seq: number): { type: string; data?: unknown } | undefined
+  eventAt(seq: number): { type: string; time?: number; data?: unknown } | undefined
 }
 
 function isObject(value: unknown): value is Record<string, unknown> {
@@ -170,12 +190,16 @@ interface CostHostContext {
 }
 
 /** A fresh store; `sessionsRoot` defaults to `$DSH_HOME/sessions`. */
-export function createStore(sessionsRoot = defaultSessionsRoot()): CostStore {
+export function createStore(
+  sessionsRoot = defaultSessionsRoot(),
+  deps: AccountCacheDeps = {},
+): CostStore {
   return {
     sessions: new Map(),
     history: createHistoryCache(),
     sessionsRoot,
     draining: new Map(),
+    account: createAccountCache(deps),
   }
 }
 
@@ -201,12 +225,20 @@ function asLiveSession(value: unknown): LiveSession | null {
   return {
     id,
     seq,
+    // The event's own `time` must reach the fold: without it every attempt is
+    // dated to the poll instant, which piles a long-lived session's whole history
+    // into "today" and prices it at the current period instead of its own.
     eventAt: (position: number) => {
       const raw: unknown = Reflect.apply(eventAt, value, [position])
       if (!isObject(raw)) return undefined
       const type: unknown = Reflect.get(raw, 'type')
       if (typeof type !== 'string') return undefined
-      return { type, data: Reflect.get(raw, 'data') }
+      const time: unknown = Reflect.get(raw, 'time')
+      return {
+        type,
+        ...(typeof time === 'number' ? { time } : {}),
+        data: Reflect.get(raw, 'data'),
+      }
     },
   }
 }
@@ -252,11 +284,11 @@ export function refreshSession(
     summary: summarize(table, []),
     lastAt: 0,
   }
-  // The live registry is read through a narrower event surface than the durable
-  // log: an event it hands back may carry no `time` at all. Dating such a sample
-  // to the epoch kept every live turn out of the day total — the day showed only
-  // the finished sessions while the open session's own figure looked right — so
-  // the fold dates it to this request's instant instead.
+  // The poll instant is only the fallback: events that carry no usable `time`
+  // (the registry reports `time: 0` for some) would otherwise date to the epoch
+  // and fall outside every billing day. Events with a real timestamp are dated
+  // by it, so a session that stays live across days keeps its attempts on the
+  // day — and the peak/off-peak period — they actually ran in.
   const observedAt = Date.now()
   for (let seq = existing.consumed; seq < session.seq; seq += 1) {
     const event = session.eventAt(seq)
@@ -377,10 +409,6 @@ export function dayScope(
   const drainingAttempts = [...store.draining.values()].flatMap((entry) => entry.attempts)
   const draining = summarizeHistoryDay(drainingAttempts, table, clock, now)
 
-  const totals = [live.summary.total, draining.summary.total, fromDisk.summary.total]
-  const total = totals.every((value) => value === null)
-    ? null
-    : totals.reduce((sum: number, value) => sum + (value ?? 0), 0)
   const hourly = fromDisk.hourly.map((bucket, hour) => ({
     hour,
     cost: bucket.cost + (live.hourly[hour]?.cost ?? 0) + (draining.hourly[hour]?.cost ?? 0),
@@ -395,7 +423,10 @@ export function dayScope(
     // `store.draining` are keyed by session id, which used to be unioned in here
     // and counted every live session as one more project of its own.
     projects: new Set([...scan.projects, ...drainingProjects]).size,
-    summary: { ...fromDisk.summary, total },
+    // The total and the token buckets must cover the same sources: spreading the
+    // disk summary and overriding only its total once rendered a live-only day as
+    // a real cost next to "0 tok".
+    summary: mergeSummaries([fromDisk.summary, live.summary, draining.summary], table.currency),
     hourly,
     skippedFiles: scan.skipped,
     unpriced: [...new Set([...fromDisk.unpriced, ...live.unpriced, ...draining.unpriced])],
@@ -413,6 +444,20 @@ export function dayScope(
 /** Resolve the price book for a requested currency. */
 export function tableFor(currency: unknown): RateTable {
   return currency === 'USD' ? RATE_TABLES['USD'] : CNY_RATE_TABLE
+}
+
+/** The account-level (all-devices) block the panel renders next to the machine-level figures. */
+export interface AccountWire {
+  /** False when no platform token is configured; the rest is then meaningless. */
+  configured: boolean
+  status: AccountStatus
+  /** Currency the platform settles in; absent while unknown. */
+  currency?: CurrencyCode
+  /** Settled cost of the billed (Beijing) day across every device, null before the first fetch. */
+  today: number | null
+  tokens: { cacheHit: number; cacheMiss: number; completion: number } | null
+  /** Last successful platform fetch, epoch ms. */
+  asOf: number | null
 }
 
 /** JSON body of the summary route. */
@@ -483,6 +528,12 @@ export interface SummaryPayload {
    * the current instant would claim the rate changes right now.
    */
   period?: { current: string; next?: string; nextAt?: number }
+  /**
+   * Account-level settled usage (all devices) from the platform, scoped to the billed Beijing day.
+   * These are the platform's actuals, unlike the machine-level estimates above; the two scopes are
+   * expected to differ on a multi-device account, and the panel labels them apart.
+   */
+  account?: AccountWire
   generatedAt: number
 }
 
@@ -515,6 +566,18 @@ export function wirePeriod(instant: {
     return { current: instant.period }
   }
   return { current: instant.period, next: instant.nextPeriod, nextAt: instant.nextTransitionAt }
+}
+
+/** Shape the account cache's reading for the wire. */
+export function wireAccount(snapshot: AccountSnapshot): AccountWire {
+  return {
+    configured: snapshot.status !== 'no-token',
+    status: snapshot.status,
+    ...(snapshot.currency === null ? {} : { currency: snapshot.currency }),
+    today: snapshot.cost,
+    tokens: snapshot.tokens,
+    asOf: snapshot.asOf,
+  }
 }
 
 /** Build the response body for one session. */
@@ -553,6 +616,7 @@ export function buildSummary(
       currency: table.currency,
       today: todayBlock(null),
       period,
+      account: wireAccount(store.account.snapshot()),
       generatedAt: now,
     }
   }
@@ -590,6 +654,7 @@ export function buildSummary(
     turn: { total: turnSummary.total, pricedAttempts: turnSummary.pricedAttempts },
     today: todayBlock(state.summary.total),
     period,
+    account: wireAccount(store.account.snapshot()),
     generatedAt: now,
   }
 }
@@ -622,6 +687,7 @@ export function queryParam(url: string | undefined, key: string): string | null 
  */
 function asHttpRequest(value: unknown): {
   url: string | undefined
+  method: string | undefined
   headers: { host: string | undefined } | undefined
   socket: { remoteAddress: string | undefined } | undefined
 } | null {
@@ -629,8 +695,10 @@ function asHttpRequest(value: unknown): {
   const headers = value['headers']
   const socket = value['socket']
   const url = value['url']
+  const method = value['method']
   return {
     url: typeof url === 'string' ? url : undefined,
+    method: typeof method === 'string' ? method : undefined,
     headers: isObject(headers)
       ? { host: typeof headers['host'] === 'string' ? headers['host'] : undefined }
       : undefined,
@@ -640,6 +708,29 @@ function asHttpRequest(value: unknown): {
             typeof socket['remoteAddress'] === 'string' ? socket['remoteAddress'] : undefined,
         }
       : undefined,
+  }
+}
+
+/** Whether a raw request carries a readable body stream. */
+function isAsyncIterable(value: unknown): value is AsyncIterable<unknown> {
+  return isObject(value) && typeof Reflect.get(value, Symbol.asyncIterator) === 'function'
+}
+
+/** Parse a small JSON body from a raw request; null when there is none or it is not JSON. */
+async function readJsonBody(request: unknown, limitBytes = 8192): Promise<unknown> {
+  if (!isAsyncIterable(request)) return null
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of request) {
+    const part = Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk))
+    size += part.length
+    if (size > limitBytes) return null
+    chunks.push(part)
+  }
+  try {
+    return JSON.parse(Buffer.concat(chunks).toString('utf8'))
+  } catch {
+    return null
   }
 }
 
@@ -680,8 +771,12 @@ function sendJson(
 }
 
 /** Plugin body: register the two routes and keep the store on this fiber. */
-export function apply(ctx: CostHostContext, config: CostPluginConfig = {}): void {
-  const store = createStore()
+export function apply(
+  ctx: CostHostContext,
+  config: CostPluginConfig = {},
+  deps: AccountCacheDeps = {},
+): void {
+  const store = createStore(defaultSessionsRoot(), deps)
   const defaultTable = tableForConfig(config)
   ctx.effect(() => {
     const disposeSummary = ctx.webServer.register({
@@ -715,6 +810,9 @@ export function apply(ctx: CostHostContext, config: CostPluginConfig = {}): void
           // Sessions that ended since the last poll are handed to the disk scan
           // rather than kept frozen at their last folded state.
           evictEndedSessions(store, liveIds)
+          // Answered from the cache; the platform is only asked in the background
+          // when the reading is stale, so a slow platform never holds the route.
+          void store.account.revalidate(Date.now())
           sendJson(response, 200, buildSummary(store, sessionId, table, clock, Date.now()))
         } catch (error) {
           ctx.logger.warn(`dsh-cost: summary failed: ${String(error)}`)
@@ -752,8 +850,62 @@ export function apply(ctx: CostHostContext, config: CostPluginConfig = {}): void
         })
       },
     })
+    const disposeToken = ctx.webServer.register({
+      kind: 'exact',
+      path: ACCOUNT_TOKEN_PATH,
+      handler: async (rawRequest, rawResponse) => {
+        const request = asHttpRequest(rawRequest)
+        const response = asHttpResponse(rawResponse)
+        if (request === null || response === null) return
+        if (!isLoopbackRequest(request)) {
+          sendJson(response, 403, { ok: false, error: 'forbidden' })
+          return
+        }
+        if (request.method !== 'POST') {
+          sendJson(response, 405, { ok: false, error: 'method-not-allowed' })
+          return
+        }
+        try {
+          const body = await readJsonBody(rawRequest)
+          const token: unknown = isObject(body) ? body['token'] : undefined
+          if (typeof token !== 'string') {
+            sendJson(response, 400, { ok: false, error: 'bad-request' })
+            return
+          }
+          const trimmed = token.trim()
+          if (trimmed === '') {
+            deletePlatformToken()
+            store.account.reset()
+            void store.account.revalidate(Date.now())
+            sendJson(response, 200, { ok: true, account: wireAccount(store.account.snapshot()) })
+            return
+          }
+          // Validate before persisting: a mistyped or expired token must not
+          // replace a working one, and the panel can say why it was rejected.
+          const dayStartMs = dayStart(dayKey(Date.now(), ACCOUNT_TIMEZONE), ACCOUNT_TIMEZONE)
+          const result = await fetchAccountUsage({
+            token: trimmed,
+            dayStartMs,
+            ...(deps.fetcher === undefined ? {} : { fetcher: deps.fetcher }),
+          })
+          if (!result.ok) {
+            sendJson(response, 200, { ok: false, error: result.error })
+            return
+          }
+          writePlatformToken(trimmed)
+          store.account.reset()
+          // Awaited, so the panel's next summary poll already shows the fresh reading.
+          await store.account.revalidate(Date.now())
+          sendJson(response, 200, { ok: true, account: wireAccount(store.account.snapshot()) })
+        } catch (error) {
+          ctx.logger.warn(`dsh-cost: account-token failed: ${String(error)}`)
+          sendJson(response, 500, { ok: false, error: 'internal' })
+        }
+      },
+    })
     return () => {
       disposeSummary()
+      disposeToken()
       disposeConfig()
       store.sessions.clear()
       store.draining.clear()
