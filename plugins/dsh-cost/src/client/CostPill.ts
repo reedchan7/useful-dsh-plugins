@@ -97,6 +97,9 @@ interface SummaryPayload {
     sources?: {
       live: number | null
       liveSessions: number
+      /** Ended sessions whose logs are still catching up, counted from memory. */
+      draining?: number | null
+      drainingSessions?: number
       history: number | null
       historySessions: number
     }
@@ -710,6 +713,16 @@ export function CostPill(props: CostPillProps): ReturnType<typeof h> | null {
         `${t('panel.sourceLive')} ${formatMoney(sources?.live ?? null, currency, locale)} · ` +
           `${t('panel.sourceHistory')} ${formatMoney(sources?.history ?? null, currency, locale)}`,
       ),
+      // Ended sessions whose checkpoint flush has not landed yet are counted from
+      // the fold that watched them; naming the state keeps the total from reading
+      // as a finished-sessions figure that disagrees with the session list.
+      (sources?.draining ?? 0) > 0
+        ? h(
+            'span',
+            {},
+            `${t('panel.sourceDraining')} ${formatMoney(sources?.draining ?? null, currency, locale)}`,
+          )
+        : null,
       (sources?.history ?? null) === null
         ? h(
             'span',

@@ -56,12 +56,14 @@ Restart `dsh web` and hard-refresh the browser. Restarting alone does not rebuil
 
 ## Scope and limitations
 
-- **Today** is account-level and includes finished sessions. Two sources are merged: the live session
-  registry (turns that have not reached disk yet) and the durable session store under
-  `$DSH_HOME/sessions`, which is read per project directory, decompressed, folded, and cached by
-  modification time. The day boundary follows your timezone. A session is handed from the first
-  source to the second as soon as the host registry drops it, so the events a session writes after
-  its last poll are still counted.
+- **Today** is account-level and includes finished sessions. Three sources are merged: the live
+  session registry (turns that have not reached disk yet); a draining set of sessions the registry
+  already dropped whose checkpoint flush has not landed yet — the store buffers a session's events
+  and writes them at a checkpoint, so the on-disk log can lag the end of a session by an hour or
+  more, and these sessions keep counting from the fold that watched them until the log demonstrably
+  covers it; and the durable session store under `$DSH_HOME/sessions`, which is read per project
+  directory, decompressed, folded, and cached by modification time. The day boundary follows your
+  timezone.
 - A session that is only open in the browser and no longer live in the host process reports
   `not-live` for its session detail; the day total is unaffected.
 - A session log this build cannot read is **counted and shown** in the panel footer rather than

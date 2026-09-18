@@ -52,6 +52,7 @@ export const en = {
     'Only the sessions live in this process are counted so far; finished session logs were not readable.',
   'panel.sourceLive': 'Live sessions',
   'panel.sourceHistory': 'Finished sessions',
+  'panel.sourceDraining': 'Handing over',
   'panel.unpricedModels': 'Unpriced models: {models}',
   'panel.noUsage': 'No token usage in this session yet.',
   'panel.scopeNote':

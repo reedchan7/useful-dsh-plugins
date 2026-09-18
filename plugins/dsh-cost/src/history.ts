@@ -11,6 +11,16 @@
  * Reading is bounded on purpose: only files modified inside the requested window are touched, each
  * file is folded once and cached by modification time, and a file this build cannot read is counted
  * and reported rather than skipped in silence.
+ *
+ * The handover from registry to disk is the fragile moment. The registry drops a session the moment
+ * it ends, but the store buffers a session's events in memory and flushes them to its log at a
+ * later checkpoint — the file can hold nothing but the header for an hour or more (observed in
+ * production: a ¥10 session whose log stayed at its 495-byte header 80 minutes after it ended). A
+ * plugin that trusts the file at eviction silently loses the whole session until the checkpoint
+ * lands, which is what made the day total jump every time a session was switched. Ended sessions
+ * therefore stay in a draining state: the attempts folded while live are kept in memory, the disk
+ * log is folded in as checkpoints land, and the disk side takes over only once it demonstrably
+ * covers the memory fold.
  */
 
 import { readFileSync, readdirSync, statSync } from 'node:fs'
@@ -64,6 +74,31 @@ interface CacheEntry {
   /** Size at read time, used to re-check an entry that yielded nothing. */
   size: number
 }
+
+/**
+ * One ended session kept in memory until its durable log catches up.
+ *
+ * The registry hands a session over while its log still lags behind (see the module header), so the
+ * attempts folded while it was live cannot be dropped on eviction. They are retained here, the disk
+ * log is merged in on every scan, and once the log demonstrably covers them the entry is dropped
+ * and the plain disk path owns the session from then on.
+ */
+export interface DrainingState {
+  /** Attempts folded from the registry while the session was live, in fold order. */
+  attempts: readonly UsageAttempt[]
+  /** Wall time the session was handed over, used to bound how long an entry is kept. */
+  drainedAt: number
+  /** Project directories this session's log has been seen under. */
+  projects: string[]
+  /**
+   * True once the disk log has been seen to cover {@link attempts}; the next scan hands the session
+   * to the plain disk path.
+   */
+  covered: boolean
+}
+
+/** How long a handover may take before the entry is dropped anyway: two days, the scan window. */
+const DRAIN_SWEEP_MS = 2 * 24 * 3600 * 1000
 
 /** Parse one JSONL log into the events the fold understands. */
 function parseLog(text: string): SessionEventLike[] {
@@ -159,11 +194,65 @@ export function createHistoryCache(): HistoryCache {
 }
 
 /**
+ * Whether two attempts stand at the same position of one session's request stream. Timestamps
+ * deliberately play no part: the registry surface drops an event's own time, so an attempt folded
+ * from the registry is dated to a poll instant while the same attempt folded from the log carries
+ * its true event time.
+ */
+function sameAttemptPosition(left: UsageAttempt, right: UsageAttempt): boolean {
+  return left.turn === right.turn && left.step === right.step
+}
+
+/**
+ * Merge the attempts of a draining session with a fresh fold of its disk log.
+ *
+ * Both sides describe the same append-only stream at different prefixes — the retained attempts
+ * stop where the registry stopped, the disk fold stops where the latest checkpoint stopped — so
+ * when the disk side reaches at least as far and every retained attempt lines up with the disk
+ * fold's first entries, the disk fold alone is the session (it also carries true event times).
+ * Ordering is what makes retries safe: two attempts of one step sit in stream order on both sides,
+ * so duplicates pair up positionally instead of being matched away.
+ *
+ * When the sequences diverge — a revived session rewritten from scratch, say — the fold falls back
+ * to a union keyed on the attempt's full contents, which cannot match across genuinely different
+ * requests. The entry then stays uncovered until the window sweep drops it.
+ */
+export function mergeAttemptTail(
+  retained: readonly UsageAttempt[],
+  disk: readonly UsageAttempt[],
+): { attempts: readonly UsageAttempt[]; covered: boolean } {
+  if (
+    disk.length >= retained.length &&
+    retained.every((attempt, index) => {
+      const candidate = disk[index]
+      return candidate !== undefined && sameAttemptPosition(attempt, candidate)
+    })
+  ) {
+    return { attempts: disk, covered: true }
+  }
+  const seen = new Set(
+    retained.map(
+      (attempt) =>
+        `${attempt.turn}/${attempt.step}/${attempt.tokens.input}/${attempt.tokens.cacheRead}/${attempt.tokens.output}/${attempt.tokens.cacheWrite ?? 0}`,
+    ),
+  )
+  const extra = disk.filter((attempt) => {
+    const key = `${attempt.turn}/${attempt.step}/${attempt.tokens.input}/${attempt.tokens.cacheRead}/${attempt.tokens.output}/${attempt.tokens.cacheWrite ?? 0}`
+    if (seen.has(key)) return false
+    seen.add(key)
+    return true
+  })
+  return { attempts: [...retained, ...extra], covered: false }
+}
+
+/**
  * Fold every session log that could hold spend inside the local day. The window starts one local
  * day before the requested day so a session that began before midnight and is still running is not
  * lost; the caller filters by attempt timestamp anyway.
  *
  * @param liveSessionIds - Sessions the host already folds, whose files are skipped.
+ * @param draining - Sessions the registry handed over but whose logs have not caught up; their
+ *   files are folded into the retained state instead of the scan, and never counted twice.
  */
 export function scanHistory(
   cache: HistoryCache,
@@ -171,6 +260,7 @@ export function scanHistory(
   clock: BillingClock,
   now: number,
   liveSessionIds: ReadonlySet<string>,
+  draining?: Map<string, DrainingState>,
 ): HistoryScan {
   const started = Date.now()
   const today = clockDayKey(now, clock)
@@ -181,9 +271,35 @@ export function scanHistory(
   let sessionsRead = 0
   let skipped = 0
 
+  // Sweep entries the handover has not finished in two days, and covered entries the
+  // disk path now owns; both would otherwise pin their files out of the scan for the
+  // process lifetime. Age is measured from the handover itself: a session's newest
+  // *closed* attempt can sit well before it ended (its last request closes only when
+  // the log's closing boundary reaches the fold), which is not old age.
+  if (draining !== undefined) {
+    for (const [id, entry] of draining) {
+      if (entry.covered || now - entry.drainedAt > DRAIN_SWEEP_MS) draining.delete(id)
+    }
+  }
+
   for (const file of files) {
     const id = file.path.split('/').slice(-2, -1)[0] ?? ''
     if (liveSessionIds.has(id)) continue
+    const drainingEntry = draining?.get(id)
+    if (drainingEntry !== undefined) {
+      // The memory side owns this session until its log catches up. Fold whatever the latest
+      // checkpoint has landed and merge it in; the scan itself must not count the file.
+      const events = readSessionLog(file.path)
+      if (events !== null) {
+        const merged = mergeAttemptTail(drainingEntry.attempts, foldAttempts(events))
+        drainingEntry.attempts = merged.attempts
+        drainingEntry.covered = drainingEntry.covered || merged.covered
+        if (!drainingEntry.projects.includes(file.project)) {
+          drainingEntry.projects = [...drainingEntry.projects, file.project]
+        }
+      }
+      continue
+    }
     const cached = cache.get(file.path)
     let folded: readonly UsageAttempt[]
     // A cached empty result is re-read once per modification: a log too short to

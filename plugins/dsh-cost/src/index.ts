@@ -34,6 +34,8 @@ import {
   createHistoryCache,
   scanHistory,
   summarizeHistoryDay,
+  mergeAttemptTail,
+  type DrainingState,
   type HistoryCache,
   type HistoryScan,
 } from './history.ts'
@@ -133,6 +135,13 @@ export interface CostStore {
   history: HistoryCache
   /** Root of the durable session store this process reads. */
   sessionsRoot: string
+  /**
+   * Sessions the registry handed over whose durable logs have not caught up yet. The registry drops
+   * a session the moment it ends, but the store buffers its events and flushes them at a later
+   * checkpoint, so the attempts folded while live are kept here and the disk log is merged in as
+   * checkpoints land (see {@link scanHistory}).
+   */
+  draining: Map<string, DrainingState>
 }
 
 /** The slice of a DSH session the fold reads. */
@@ -162,7 +171,12 @@ interface CostHostContext {
 
 /** A fresh store; `sessionsRoot` defaults to `$DSH_HOME/sessions`. */
 export function createStore(sessionsRoot = defaultSessionsRoot()): CostStore {
-  return { sessions: new Map(), history: createHistoryCache(), sessionsRoot }
+  return {
+    sessions: new Map(),
+    history: createHistoryCache(),
+    sessionsRoot,
+    draining: new Map(),
+  }
 }
 
 /** The durable session store root of the running harness. */
@@ -226,6 +240,12 @@ export function refreshSession(
   table: RateTable,
   clock: BillingClock,
 ): SessionCostState {
+  // A session the registry handed back (reopened after it ended) must not be folded
+  // twice: whatever the draining state holds describes the same stream the registry
+  // is about to replay or resume. Merging after the registry fold makes either
+  // behaviour exact: a full replay covers the retained attempts positionally, a
+  // resume only appends what the registry never delivered.
+  const drained = store.draining.get(session.id)
   const existing = store.sessions.get(session.id) ?? {
     fold: emptyFoldState(),
     consumed: 0,
@@ -242,6 +262,12 @@ export function refreshSession(
     const event = session.eventAt(seq)
     if (event === undefined) continue
     foldEvent(existing.fold, event, observedAt)
+  }
+  if (drained !== undefined) {
+    store.draining.delete(session.id)
+    existing.fold.attempts = [
+      ...mergeAttemptTail(drained.attempts, existing.fold.attempts).attempts,
+    ]
   }
   const attempts = existing.fold.attempts
   const last = attempts.at(-1)
@@ -278,6 +304,12 @@ export interface DayScope {
     /** Cost from sessions live in this process, or null when none could be priced. */
     live: number | null
     liveSessions: number
+    /**
+     * Cost from sessions the registry already dropped but whose logs have not caught up, still
+     * folded from memory; null when none could be priced.
+     */
+    draining: number | null
+    drainingSessions: number
     /** Cost from finished session logs on disk, or null when none were read. */
     history: number | null
     historySessions: number
@@ -285,29 +317,40 @@ export interface DayScope {
 }
 
 /**
- * Drop the fold state of sessions the registry no longer holds. A session leaves
- * `ctx.sessions.list()` the moment it ends, and its log keeps growing until the last event is
- * written. Keeping the entry would do two kinds of damage: the id stays in the set that tells the
- * disk scan which files to skip, so the session's closing events are never read anywhere and its
- * cost freezes at the last poll; and the map grows for the lifetime of the process. Eviction hands
- * the session to the disk scan, which reads it from the beginning.
+ * Hand the sessions the registry no longer holds over to their durable logs. The registry drops a
+ * session the moment it ends, but the store's checkpoint flush lands later — often much later — so
+ * deleting the fold now would read a log that may still hold nothing but the session header and
+ * silently lose the whole session from the day total (the number a reader watches jump every time a
+ * session is switched). Instead the fold moves to {@link CostStore.draining}: it keeps counting from
+ * memory, absorbs the disk log as checkpoints land, and hands over to the plain disk path once the
+ * log demonstrably covers it.
  */
 export function evictEndedSessions(store: CostStore, liveIds: ReadonlySet<string>): number {
   let evicted = 0
-  for (const id of store.sessions.keys()) {
+  for (const [id, state] of store.sessions) {
     if (liveIds.has(id)) continue
     store.sessions.delete(id)
+    if (!store.draining.has(id)) {
+      store.draining.set(id, {
+        attempts: state.fold.attempts,
+        drainedAt: Date.now(),
+        projects: [],
+        covered: false,
+      })
+    }
     evicted += 1
   }
   return evicted
 }
 
 /**
- * Aggregate one local day across every session on this machine. Two sources, because neither is
+ * Aggregate one local day across every session on this machine. Three sources, because none is
  * complete on its own: the live registry holds sessions whose log is still being appended
- * (including turns not yet flushed to disk), and the session store holds every session that already
- * ended. The scope is account-level on purpose — a reader asking "what did today cost" means every
- * project, not the one whose session happens to be open.
+ * (including turns not yet flushed to disk); the draining set holds sessions the registry dropped
+ * whose checkpoint flush has not landed yet, without which a switched session would vanish from the
+ * total until the store caught up; and the session store holds every session whose log is already
+ * durable. The scope is account-level on purpose — a reader asking "what did today cost" means
+ * every project, not the one whose session happens to be open.
  */
 export function dayScope(
   store: CostStore,
@@ -322,38 +365,45 @@ export function dayScope(
     clock,
     now,
     new Set(store.sessions.keys()),
+    store.draining,
   )
   const fromDisk = summarizeHistoryDay(scan.attempts, table, clock, now)
 
-  // Live sessions contribute their own attempts so a turn that is still running
-  // is counted even though its log line has not been written yet.
+  // Live and draining sessions contribute their own attempts: a turn that is still
+  // running is counted even though its log line has not been written yet, and a
+  // session whose log is still catching up is counted from the fold that watched it.
   const liveAttempts = [...store.sessions.values()].flatMap((state) => state.fold.attempts)
   const live = summarizeHistoryDay(liveAttempts, table, clock, now)
+  const drainingAttempts = [...store.draining.values()].flatMap((entry) => entry.attempts)
+  const draining = summarizeHistoryDay(drainingAttempts, table, clock, now)
 
-  const total =
-    live.summary.total === null && fromDisk.summary.total === null
-      ? null
-      : (live.summary.total ?? 0) + (fromDisk.summary.total ?? 0)
+  const totals = [live.summary.total, draining.summary.total, fromDisk.summary.total]
+  const total = totals.every((value) => value === null)
+    ? null
+    : totals.reduce((sum: number, value) => sum + (value ?? 0), 0)
   const hourly = fromDisk.hourly.map((bucket, hour) => ({
     hour,
-    cost: bucket.cost + (live.hourly[hour]?.cost ?? 0),
-    tokens: bucket.tokens + (live.hourly[hour]?.tokens ?? 0),
+    cost: bucket.cost + (live.hourly[hour]?.cost ?? 0) + (draining.hourly[hour]?.cost ?? 0),
+    tokens: bucket.tokens + (live.hourly[hour]?.tokens ?? 0) + (draining.hourly[hour]?.tokens ?? 0),
   }))
+  const drainingProjects = [...store.draining.values()].flatMap((entry) => entry.projects)
 
   return {
     dayKey: key,
-    sessions: store.sessions.size + scan.sessionsRead,
-    // Both sides are project *directories*; `store.sessions` is keyed by session
-    // id, which used to be unioned in here and counted every live session as one
-    // more project of its own.
-    projects: scan.projects.length,
+    sessions: store.sessions.size + store.draining.size + scan.sessionsRead,
+    // All three sides are project *directories*; `store.sessions` and
+    // `store.draining` are keyed by session id, which used to be unioned in here
+    // and counted every live session as one more project of its own.
+    projects: new Set([...scan.projects, ...drainingProjects]).size,
     summary: { ...fromDisk.summary, total },
     hourly,
     skippedFiles: scan.skipped,
-    unpriced: [...new Set([...fromDisk.unpriced, ...live.unpriced])],
+    unpriced: [...new Set([...fromDisk.unpriced, ...live.unpriced, ...draining.unpriced])],
     sources: {
       live: live.summary.total,
       liveSessions: store.sessions.size,
+      draining: draining.summary.total,
+      drainingSessions: store.draining.size,
       history: fromDisk.summary.total,
       historySessions: scan.sessionsRead,
     },
@@ -412,11 +462,15 @@ export interface SummaryPayload {
      * What each source contributed.
      *
      * Present so a UI can say "this is only the live sessions" instead of showing a total that
-     * quietly omits half the day.
+     * quietly omits half the day. `draining`/`drainingSessions` are absent on a host older than
+     * this bundle and stand for "ended sessions whose logs are still catching up, counted from the
+     * fold that watched them".
      */
     sources?: {
       live: number | null
       liveSessions: number
+      draining?: number | null
+      drainingSessions?: number
       history: number | null
       historySessions: number
     }
@@ -702,6 +756,7 @@ export function apply(ctx: CostHostContext, config: CostPluginConfig = {}): void
       disposeSummary()
       disposeConfig()
       store.sessions.clear()
+      store.draining.clear()
     }
   }, 'dsh-cost: routes')
 }

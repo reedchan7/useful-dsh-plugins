@@ -52,6 +52,7 @@ export const zh: Record<CostLocaleKey, string> = {
   'panel.dayOnlyLive': '目前只统计了本进程内仍 live 的会话，磁盘上已结束的会话日志未能读取。',
   'panel.sourceLive': 'live 会话',
   'panel.sourceHistory': '已结束会话',
+  'panel.sourceDraining': '交接中',
   'panel.unpricedModels': '未计价模型：{models}',
   'panel.noUsage': '本会话还没有 token 用量。',
   'panel.scopeNote': '统计范围：本机 {projects} 个项目、{sessions} 个会话。',
